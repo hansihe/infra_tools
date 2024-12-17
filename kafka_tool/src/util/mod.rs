@@ -1,4 +1,4 @@
-use std::{future::Future, pin::Pin};
+use std::future::Future;
 
 #[pin_project::pin_project(project = EnumProj)]
 pub enum MaybeFut<F> {

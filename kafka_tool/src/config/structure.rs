@@ -4,11 +4,10 @@ use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
 pub struct StructureConfig {
-    #[serde(default)]
-    pub show_unknown_topics: bool,
-
-    #[serde(default)]
-    pub lua_package_path: String,
+    //#[serde(default)]
+    //pub show_unknown_topics: bool,
+    //#[serde(default)]
+    //pub lua_package_path: String,
     #[serde(default)]
     pub lua_require: Vec<String>,
 

@@ -36,6 +36,9 @@ pub struct PartitionData {
     // built from subscriptions + fixed logic.
     subscribed_records: RoaringBitmap,
     requested_loads_dirty: bool,
+    // Increments every time anything changes in the partition
+    // data state.
+    state_counter: u64,
 }
 
 impl PartitionData {
@@ -60,12 +63,17 @@ impl PartitionData {
         !self.subscriptions.is_empty()
     }
 
+    pub fn state_counter(&self) -> u64 {
+        self.state_counter
+    }
+
     fn get_first_chunk_before_offset(&self, offset: i64) -> Option<&Vec<RecordAndOffset>> {
         self.chunks.range(..=offset).last().map(|v| v.1)
     }
 
     pub fn set_broker_offset(&mut self, at: OffsetAt, offset: i64) {
         self.requested_loads_dirty = true;
+        self.state_counter += 1;
         match at {
             OffsetAt::Earliest => self.offsets.start = Some(offset),
             OffsetAt::Latest => self.offsets.end = Some(offset),
@@ -85,6 +93,7 @@ impl PartitionData {
             .insert_range((first_offset as u32)..(first_offset as u32 + chunk.len() as u32));
         self.chunks.insert(first_offset, chunk);
         self.requested_loads_dirty = true;
+        self.state_counter += 1;
     }
 
     pub fn put_subscription(&mut self, id: u64, range: Option<Range<i64>>) {
@@ -178,4 +187,78 @@ pub fn bitmap_contiguous_ranges(bitmap: &RoaringBitmap) -> Vec<Range<i64>> {
         out.push(range_start..next_contig);
     }
     out
+}
+
+#[cfg(test)]
+mod test {
+    use rskafka::record::Record;
+
+    use super::*;
+
+    fn make_record() -> Record {
+        Record {
+            key: None,
+            value: None,
+            headers: BTreeMap::new(),
+            timestamp: Default::default(),
+        }
+    }
+
+    fn make_chunk(start: i64, count: usize) -> Vec<RecordAndOffset> {
+        let mut out = Vec::new();
+        for n in 0..count {
+            out.push(RecordAndOffset {
+                record: make_record(),
+                offset: start + n as i64,
+            });
+        }
+        out
+    }
+
+    #[test]
+    fn test_iteration_around_chunk() {
+        let mut pd = PartitionData::default();
+        pd.insert_chunk(make_chunk(5, 3));
+
+        let mut it = pd.start_iter_rev(9);
+        assert!(it.next().is_none());
+        assert!(it.next().is_none());
+        assert!(it.next().unwrap().offset == 7);
+        assert!(it.next().unwrap().offset == 6);
+        assert!(it.next().unwrap().offset == 5);
+        assert!(it.next().is_none());
+
+        let mut it = pd.start_iter_rev(6);
+        assert!(it.next().unwrap().offset == 6);
+        assert!(it.next().unwrap().offset == 5);
+        assert!(it.next().is_none());
+    }
+
+    #[test]
+    fn test_iteration_reentry() {
+        let mut pd = PartitionData::default();
+        pd.insert_chunk(make_chunk(5, 1));
+        pd.insert_chunk(make_chunk(7, 1));
+
+        let mut it = pd.start_iter_rev(8);
+        assert!(it.next().is_none());
+        assert!(it.next().unwrap().offset == 7);
+        assert!(it.next().is_none());
+        assert!(it.next().unwrap().offset == 5);
+        assert!(it.next().is_none());
+    }
+
+    #[test]
+    fn test_iteration_overlapping() {
+        let mut pd = PartitionData::default();
+        pd.insert_chunk(make_chunk(6, 2));
+        pd.insert_chunk(make_chunk(7, 2));
+
+        let mut it = pd.start_iter_rev(9);
+        assert!(it.next().is_none());
+        assert!(it.next().unwrap().offset == 8);
+        assert!(it.next().unwrap().offset == 7);
+        assert!(it.next().unwrap().offset == 6);
+        assert!(it.next().is_none());
+    }
 }

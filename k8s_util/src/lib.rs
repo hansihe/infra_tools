@@ -7,7 +7,7 @@ use kube::Client;
 use tokio::io::{AsyncRead, AsyncWrite};
 
 pub mod apis;
-//pub mod build_env;
+pub mod build_env;
 pub mod client;
 pub mod config_dir;
 //pub mod domain_name;
@@ -15,24 +15,25 @@ pub mod kube_types;
 pub mod socks5;
 
 pub async fn create_client(k8s_context: Option<String>) -> anyhow::Result<Client> {
-    let context: String;
-    if let Some(ctx) = k8s_context {
-        context = ctx;
-    } else {
-        let (_, _, contexts) = client::create_client_with_specific_context(None, None).await?;
-        if contexts.len() == 1 {
-            context = contexts[0].clone();
-        } else {
-            bail!("please choose a k8s context: {:?}", contexts);
-        }
-    }
+    //let context: String;
+    //if let Some(ctx) = k8s_context {
+    //    context = ctx;
+    //} else {
+    //    let (_, _, contexts) = client::create_client(None, None).await?;
+    //    if contexts.len() == 1 {
+    //        context = contexts[0].clone();
+    //    } else {
+    //        bail!("please choose a k8s context: {:?}", contexts);
+    //    }
+    //}
 
-    let (client, _config, _contexts) =
-        client::create_client_with_specific_context(None, Some(&context))
-            .await
-            .unwrap();
-    let client = client.context("attempting to get client")?;
+    //let (client, _config, _contexts) =
+    //    client::create_client_with_specific_context(None, Some(&context))
+    //        .await
+    //        .unwrap();
+    //let client = client.context("attempting to get client")?;
 
+    let (client, _kubeconfig) = client::create_client(None, k8s_context.as_deref()).await?;
     Ok(client)
 }
 

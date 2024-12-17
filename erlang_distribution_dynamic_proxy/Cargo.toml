@@ -37,3 +37,7 @@ tokio = { version = "1.41.0", features = ["full"] }
 tower = { version = "0.5.1", features = ["tokio", "util"] }
 tracing = "0.1.40"
 k8s_util = { path = "../k8s_util" }
+erl_dist = "0.6.0"
+tokio-util = { version = "0.7.13", features = ["codec"] }
+byteorder = "1.5.0"
+nom = "7.1.3"

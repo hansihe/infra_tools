@@ -1,11 +1,12 @@
+#![allow(dead_code)]
 use anyhow::{bail, Context, Result};
 use std::{
-    io::{BufWriter, Write},
-    net::{Ipv4Addr, SocketAddr, ToSocketAddrs},
+    io::Write,
+    net::{SocketAddr, ToSocketAddrs},
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader},
-    net::{TcpSocket, TcpStream},
+    net::TcpStream,
     pin,
 };
 
@@ -61,6 +62,7 @@ pub async fn read_all_nodes_sock(socket: impl AsyncRead + AsyncWrite) -> Result<
 }
 
 pub struct NodeRegistrationHandle {
+    #[allow(unused)]
     socket: TcpStream,
     pub creation: u32,
 }
@@ -117,7 +119,7 @@ pub async fn register_node(
     Ok(NodeRegistrationHandle { socket, creation })
 }
 
-pub async fn get_dist_port(epmd_addr: &SocketAddr, name: &str) -> Result<()> {
+pub async fn get_dist_port(epmd_addr: &SocketAddr, name: &str) -> Result<String> {
     let socket = TcpStream::connect(epmd_addr)
         .await
         .context("when establishing connection to EPMD")?;
@@ -125,7 +127,10 @@ pub async fn get_dist_port(epmd_addr: &SocketAddr, name: &str) -> Result<()> {
     get_dist_port_stream(socket, name).await
 }
 
-pub async fn get_dist_port_stream(socket: impl AsyncRead + AsyncWrite, name: &str) -> Result<()> {
+pub async fn get_dist_port_stream(
+    socket: impl AsyncRead + AsyncWrite,
+    name: &str,
+) -> Result<String> {
     pin!(socket);
 
     socket.write_u16(1 + name.len() as u16).await?;
@@ -153,31 +158,32 @@ pub async fn get_dist_port_stream(socket: impl AsyncRead + AsyncWrite, name: &st
         .await
         .context("while reading lowest_version")?;
 
-    println!("port no: {}", port_no);
-    println!("node type: {}", node_type);
-    println!("protocol: {}", protocol);
-    println!("highest version: {}", highest_version);
-    println!("lowest version: {}", lowest_version);
+    log::debug!("port no: {}", port_no);
+    log::debug!("node type: {}", node_type);
+    log::debug!("protocol: {}", protocol);
+    log::debug!("highest version: {}", highest_version);
+    log::debug!("lowest version: {}", lowest_version);
 
     let node_name_len = socket.read_u16().await?;
     let mut node_name = vec![0u8; node_name_len as usize];
     socket.read_exact(&mut node_name).await?;
+    let node_name = String::from_utf8(node_name)?;
 
     let extra_len = socket.read_u16().await?;
     let mut extra = vec![0u8; extra_len as usize];
     socket.read_exact(&mut extra).await?;
 
-    println!("node name: {:?}", std::str::from_utf8(&node_name).unwrap());
-    println!("extra: {:?}", std::str::from_utf8(&extra).unwrap());
+    log::debug!("node name: {:?}", node_name);
+    log::debug!("extra: {:?}", std::str::from_utf8(&extra).unwrap());
 
-    Ok(())
+    Ok(node_name)
 }
 
 pub async fn epmd_testing(epmd_port: u16) -> Result<()> {
     let addr: SocketAddr = ("localhost", epmd_port).to_socket_addrs()?.next().unwrap();
 
     let nodes = read_all_nodes(&addr).await?;
-    println!("nodes: {:?}", nodes);
+    log::debug!("nodes: {:?}", nodes);
 
     register_node(
         &addr,

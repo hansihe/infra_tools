@@ -1,11 +1,13 @@
 use std::{
     collections::{BTreeMap, HashMap},
+    env::args,
     path::Path,
     sync::{Arc, Mutex},
 };
 
 use anyhow::Context;
-use mlua::{Function, LuaSerdeExt, Table};
+use mlua::{Function, LuaSerdeExt};
+use serde::Deserialize;
 
 fn lua_module(
     lua: &mlua::Lua,
@@ -99,11 +101,14 @@ pub struct LuaData {
 pub fn init_lua(
     config: &crate::config::structure::StructureConfig,
     rel_path: &Path,
-) -> anyhow::Result<(mlua::Lua, Arc<LuaData>)> {
+) -> anyhow::Result<(mlua::Lua, Arc<LuaData>, ConnectStrategy)> {
     let lua = mlua::Lua::new();
     let lua_state = Arc::new(LuaData::default());
 
     let path_str = rel_path.to_str().context("invalid path")?.to_owned();
+
+    let args: Vec<_> = args().skip(1).collect();
+    lua.globals().set("arg", args)?;
 
     lua.globals().get::<mlua::Table>("package")?.set(
         "path",
@@ -126,5 +131,28 @@ pub fn init_lua(
         let _: mlua::Value = lua_require.call((&**file_path,))?;
     }
 
-    Ok((lua, lua_state))
+    let bootstrap: mlua::Function = lua
+        .globals()
+        .get("Bootstrap")
+        .context("error getting bootstrap function from lua script")?;
+
+    let ret_value: mlua::Value = bootstrap
+        .call(())
+        .context("error while calling bootstrap function")?;
+
+    let connect_strategy: ConnectStrategy = lua
+        .from_value(ret_value)
+        .context("error while deserializing bootstrap return value")?;
+
+    Ok((lua, lua_state, connect_strategy))
+}
+#[derive(Debug, Deserialize)]
+#[serde(tag = "strategy")]
+pub enum ConnectStrategy {
+    #[serde(rename = "kubernetes_service")]
+    KubernetesService {
+        namespace: String,
+        service: String,
+        service_port: u16,
+    },
 }

@@ -13,6 +13,7 @@ use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioExecutor;
 use k8s_openapi::api::core::v1::{Namespace, Service, ServiceSpec};
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
+use k8s_openapi::merge_strategies;
 use kube::api::ListParams;
 use kube::client::ConfigExt;
 use kube::{
@@ -48,45 +49,57 @@ type Strategy<'a> = (&'static str, StrategyFuture<'a>);
 
 type ServiceInfo = (String, HashMap<String, String>, HashMap<String, i32>);
 
-pub async fn create_client_with_specific_context(
+async fn read_kubeconfigs(kubeconfig: Option<String>) -> Result<(Kubeconfig, Vec<String>)> {
+    let kubeconfig_paths = get_kubeconfig_paths_from_option(kubeconfig)?;
+    let (merged_kubeconfig, all_contexts, errors) = merge_kubeconfigs(&kubeconfig_paths)?;
+    if errors.len() > 0 {
+        log::error!("got errors while reading kubeconfigs: {:?}", errors);
+    }
+    Ok((merged_kubeconfig, all_contexts))
+}
+
+async fn create_client_with_context(config: &Kubeconfig, context_name: &str) -> Result<Client> {
+    match create_config_with_context(config, context_name).await {
+        Ok(config) => {
+            if let Some(client) = create_client_with_config(&config).await {
+                return Ok(client);
+            } else {
+                anyhow::bail!(
+                    "failed to create HTTPS connector for context: {}",
+                    context_name
+                );
+            }
+        }
+        Err(e) => {
+            anyhow::bail!(
+                "failed to create configuration for context: {}: {}",
+                context_name,
+                e
+            );
+        }
+    }
+}
+
+pub async fn create_client(
     kubeconfig: Option<String>,
     context_name: Option<&str>,
-) -> Result<(Option<Client>, Option<Kubeconfig>, Vec<String>)> {
+) -> Result<(Client, Kubeconfig)> {
     // Remove PYTHONHOME and PYTHONPATH environment variables
     env::remove_var("PYTHONHOME");
     env::remove_var("PYTHONPATH");
 
-    let kubeconfig_paths = get_kubeconfig_paths_from_option(kubeconfig)?;
-    let (merged_kubeconfig, all_contexts, mut errors) = merge_kubeconfigs(&kubeconfig_paths)?;
+    let (merged_kubeconfig, _all_contexts) = read_kubeconfigs(kubeconfig).await?;
+
+    let context_name = context_name.or(merged_kubeconfig.current_context.as_ref().map(|v| &**v));
 
     if let Some(context_name) = context_name {
-        match create_config_with_context(&merged_kubeconfig, context_name).await {
-            Ok(config) => {
-                if let Some(client) = create_client_with_config(&config).await {
-                    return Ok((Some(client), Some(merged_kubeconfig), all_contexts));
-                } else {
-                    errors.push(format!(
-                        "Failed to create HTTPS connector for context: {}",
-                        context_name
-                    ));
-                }
-            }
-            Err(e) => {
-                errors.push(format!(
-                    "Failed to create configuration for context: {}: {}",
-                    context_name, e
-                ));
-            }
-        }
+        let client = create_client_with_context(&merged_kubeconfig, context_name).await?;
+        Ok((client, merged_kubeconfig))
     } else {
-        info!("No specific context provided, returning all available contexts.");
-        return Ok((None, None, all_contexts));
+        anyhow::bail!(
+            "attempted to create kubernetes config, but no explicit or default context was specified"
+        )
     }
-
-    Err(anyhow::anyhow!(
-        "Unable to create client with any of the provided kubeconfig paths: {}",
-        errors.join("; ")
-    ))
 }
 
 fn get_kubeconfig_paths_from_option(kubeconfig: Option<String>) -> Result<Vec<PathBuf>> {
@@ -389,27 +402,26 @@ fn list_contexts(kubeconfig: &Kubeconfig) -> Vec<String> {
 
 pub async fn list_kube_contexts(
     kubeconfig: Option<String>,
-) -> Result<Vec<KubeContextInfo>, String> {
+) -> anyhow::Result<Vec<KubeContextInfo>> {
     info!("list_kube_contexts {}", kubeconfig.as_deref().unwrap_or(""));
 
-    let (_, kubeconfig, contexts) = create_client_with_specific_context(kubeconfig, None)
-        .await
-        .map_err(|err| format!("Failed to create client: {}", err))?;
+    let (kubeconfig, _all_contexts) = read_kubeconfigs(kubeconfig).await?;
 
-    if let Some(kubeconfig) = kubeconfig {
-        Ok(kubeconfig
-            .contexts
-            .into_iter()
-            .map(|c| KubeContextInfo { name: c.name })
-            .collect())
-    } else if !contexts.is_empty() {
-        Ok(contexts
-            .into_iter()
-            .map(|name| KubeContextInfo { name })
-            .collect())
-    } else {
-        Err("Failed to retrieve kubeconfig".to_string())
-    }
+    Ok(kubeconfig
+        .contexts
+        .into_iter()
+        .map(|c| KubeContextInfo { name: c.name })
+        .collect())
+
+    //if let Some(kubeconfig) = kubeconfig {
+    //} else if !contexts.is_empty() {
+    //    Ok(contexts
+    //        .into_iter()
+    //        .map(|name| KubeContextInfo { name })
+    //        .collect())
+    //} else {
+    //    Err("Failed to retrieve kubeconfig".to_string())
+    //}
 }
 
 pub async fn list_all_namespaces(client: Client) -> Result<Vec<String>, anyhow::Error> {

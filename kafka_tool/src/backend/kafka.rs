@@ -12,6 +12,8 @@ use rskafka::{
 };
 use rustls::ClientConfig;
 
+use crate::lua::ConnectStrategy;
+
 use super::State;
 
 use rustls::{
@@ -71,68 +73,60 @@ impl ServerCertVerifier for NoVerification {
     }
 }
 
-//(Client, BTreeMap<Spur, BTreeSet<i32>>, Vec<Spur>)
-pub async fn kafka_connect(state: &State) -> anyhow::Result<Client> {
-    // local-kafka-bootstrap:9092
-    let namespace = "staging";
-    let context = "arn:aws:eks:us-east-1:514443763038:cluster/staging-01";
+pub async fn kafka_connect(
+    connect_strategy: ConnectStrategy,
+    _state: &State,
+) -> anyhow::Result<Client> {
+    match connect_strategy {
+        ConnectStrategy::KubernetesService {
+            namespace,
+            service,
+            service_port,
+        } => {
+            let client = k8s_util::create_client(None).await.unwrap();
+            let cluster = Cluster::new(client);
 
-    let client = k8s_util::create_client(Some(context.into())).await.unwrap();
-    let cluster = Cluster::new(client);
+            log::info!("got k8s client");
 
-    log::info!("got k8s client");
+            let cluster_inner = cluster.clone();
+            let (_join_handle, local_addr) = k8s_util::socks5::listen_socks5_forward(
+                cluster_inner,
+                namespace.to_string(),
+                "localhost:0",
+            )
+            .await
+            .unwrap();
+            log::info!(
+                "bound k8s forward socks5 proxy to {}",
+                local_addr.to_string()
+            );
 
-    let cluster_inner = cluster.clone();
-    k8s_util::socks5::listen_socks5_forward(cluster_inner, namespace.to_string(), "localhost:5000")
-        .await
-        .unwrap();
+            let service_url = format!("{}:{}", service, service_port);
+            let brokers_vec = vec![service_url];
 
-    //let brokers = "b-1.staging-01.0qah24.c5.kafka.us-east-1.amazonaws.com:9094,b-2.staging-01.0qah24.c5.kafka.us-east-1.amazonaws.com:9094,b-3.staging-01.0qah24.c5.kafka.us-east-1.amazonaws.com:9094";
-    let brokers = "local-kafka-bootstrap:9092";
-    let brokers_vec = brokers
-        .split(",")
-        .map(|v| v.to_string())
-        .collect::<Vec<String>>();
+            let tls_client_config = ClientConfig::builder()
+                .dangerous()
+                .with_custom_certificate_verifier(Arc::new(NoVerification))
+                .with_no_client_auth();
 
-    let tls_client_config = ClientConfig::builder()
-        .dangerous()
-        .with_custom_certificate_verifier(Arc::new(NoVerification))
-        .with_no_client_auth();
+            let mut backoff_config = BackoffConfig::default();
+            backoff_config.deadline = Some(Duration::from_secs(2));
 
-    let mut backoff_config = BackoffConfig::default();
-    backoff_config.deadline = Some(Duration::from_secs(2));
+            log::info!("Connecting to broker...");
 
-    log::info!("Connecting to broker...");
+            let kafka_client = ClientBuilder::new(brokers_vec)
+                .tls_config(Arc::new(tls_client_config))
+                .socks5_proxy(local_addr.to_string())
+                .backoff_config(backoff_config)
+                .build()
+                .await
+                .unwrap();
 
-    let kafka_client = ClientBuilder::new(brokers_vec)
-        .tls_config(Arc::new(tls_client_config))
-        .socks5_proxy("localhost:5000".into())
-        .backoff_config(backoff_config)
-        .build()
-        .await
-        .unwrap();
+            log::info!("Connected!");
 
-    log::info!("Connected!");
-
-    Ok(kafka_client)
-
-    //let topics_raw = kafka_client.list_topics().await.unwrap();
-
-    //let topic_partitions = topics_raw
-    //    .iter()
-    //    .map(|v| {
-    //        let name = state.rodeo.get_or_intern(v.name.clone());
-    //        (name, v.partitions.clone())
-    //    })
-    //    .collect::<BTreeMap<_, _>>();
-
-    //let mut sorted_topics = topic_partitions
-    //    .iter()
-    //    .map(|(k, _v)| *k)
-    //    .collect::<Vec<_>>();
-    //sorted_topics.sort_by_key(|v| &state.rodeo[*v]);
-
-    //(kafka_client, topic_partitions, sorted_topics)
+            Ok(kafka_client)
+        }
+    }
 }
 
 pub async fn list_topics(

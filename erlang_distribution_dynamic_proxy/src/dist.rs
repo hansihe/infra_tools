@@ -15,13 +15,17 @@ pub struct SendName {
 }
 
 #[derive(Debug, DekuRead, DekuWrite)]
+#[deku(endian = "big", magic = b"sok")]
+pub struct RecvStatus {}
+
+#[derive(Debug, DekuRead, DekuWrite)]
 #[deku(endian = "big", magic = b"snamed:")]
 pub struct RecvStatusNamed {
     pub name: PString,
     pub creation: u32,
 }
 
-#[derive(Debug, DekuRead, DekuWrite)]
+#[derive(Debug, Clone, DekuRead, DekuWrite)]
 #[deku(endian = "big", magic = b"N")]
 pub struct RecvChallenge {
     pub flags: u64,
@@ -37,7 +41,7 @@ pub struct SendChallengeReply {
     pub digest: [u8; 16],
 }
 
-#[derive(Debug, DekuRead, DekuWrite)]
+#[derive(Debug, Clone, DekuRead, DekuWrite)]
 #[deku(endian = "big", magic = b"a")]
 pub struct RecvChallengeAck {
     pub digest: [u8; 16],

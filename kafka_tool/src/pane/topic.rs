@@ -4,6 +4,7 @@ use eframe::egui::{self, scroll_area::ScrollBarVisibility, Color32, Stroke, Ui, 
 use egui_json_tree::DefaultExpand;
 use egui_virtual_list::VirtualList;
 use lasso::Spur;
+use log::warn;
 use lru::LruCache;
 use mlua::LuaSerdeExt;
 use rskafka::record::RecordAndOffset;
@@ -20,6 +21,7 @@ pub struct TopicPane {
     topic_config_idx: Option<usize>,
     subscriptions: Vec<Arc<RangeSubscription>>,
     formatted_cache: LruCache<i64, serde_json::Value>,
+    last_state_counter: Option<u64>,
 }
 
 impl TopicPane {
@@ -51,6 +53,7 @@ impl TopicPane {
             state: state.clone(),
             subscriptions: vec![range_subscription],
             formatted_cache: LruCache::new(NonZeroUsize::new(1024).unwrap()),
+            last_state_counter: None,
         }
     }
 
@@ -64,6 +67,12 @@ impl TopicPane {
 
         let idx = (self.topic, 0);
         let part_data = data.data.get(idx.0, idx.1);
+
+        let state_counter = part_data.map(|v| v.state_counter());
+        if self.last_state_counter != state_counter {
+            self.last_state_counter = state_counter;
+            self.list.reset();
+        }
 
         ui.label(format!(
             "offsets: {:?}",
@@ -93,17 +102,24 @@ impl TopicPane {
                         lock.get(&v.formatter).unwrap().clone()
                     });
 
-                    let mut min_offset = i64::MAX;
-                    let mut max_offset = i64::MIN;
+                    //let mut min_offset = i64::MAX;
+                    //let mut max_offset = i64::MIN;
 
-                    self.list
+                    // Overscan controls the max heigt of elements we can have in the list.
+                    //self.list.over_scan(1000.0);
+
+                    let range_opt = part_data.offset_range();
+
+                    let resp = self
+                        .list
                         .ui_custom_layout(ui, count as usize, |ui, start_index| {
                             ui.set_width(ui.available_width());
-                            let range = part_data.offset_range().unwrap();
 
+                            let range = range_opt.clone().unwrap();
                             let start_offset = range.end - start_index as i64;
-                            min_offset = min_offset.min(start_offset);
-                            max_offset = max_offset.max(start_offset);
+
+                            //min_offset = min_offset.min(start_offset);
+                            //max_offset = max_offset.max(start_offset);
 
                             if iter.is_none() {
                                 // TODO this correct?
@@ -111,6 +127,17 @@ impl TopicPane {
                             }
 
                             let record = iter.as_mut().unwrap().next();
+
+                            if let Some(record) = record.as_ref() {
+                                if record.offset != start_offset - 1 {
+                                    warn!(
+                                        "record offset mismatch!! {} != {}",
+                                        start_offset - 1,
+                                        record.offset
+                                    );
+                                }
+                            }
+
                             list_element_ui(
                                 ui,
                                 self.topic,
@@ -124,15 +151,32 @@ impl TopicPane {
                             1
                         });
 
+                    //if let Some(range) = range_opt.clone() {
+                    //    println!(
+                    //        "visible item range: {:?}",
+                    //        (range.end - resp.item_range.start as i64)
+                    //            ..(range.end - resp.item_range.end as i64)
+                    //    );
+                    //    //println!("yolo calc item range: {:?}", min_offset..max_offset);
+                    //}
+
                     //ui.input(|input| {
                     //    println!("scroll time: {}", input.time_since_last_scroll());
                     //    println!("scroll vel: {:?}", input.smooth_scroll_delta);
                     //    //println!("mouse active: {}", input.key_down(egui::Key::));
                     //});
 
-                    if count > 0 {
-                        let lowest = crate::util::round_to_nearest(min_offset, 50, false);
-                        let highest = crate::util::round_to_nearest(max_offset, 50, true);
+                    if let Some(range) = range_opt.clone() {
+                        let lowest = crate::util::round_to_nearest(
+                            range.end - resp.item_range.end as i64,
+                            50,
+                            false,
+                        );
+                        let highest = crate::util::round_to_nearest(
+                            range.end - resp.item_range.start as i64,
+                            50,
+                            true,
+                        );
                         self.subscriptions[0].set_range(Some(lowest..highest));
                     }
                 }

@@ -1,9 +1,6 @@
 use std::{
-    borrow::Cow,
     collections::{BTreeMap, BTreeSet, HashSet},
-    future::Future,
     ops::Range,
-    pin::Pin,
     sync::Arc,
     time::Duration,
 };
@@ -11,10 +8,9 @@ use std::{
 use eframe::egui::Context;
 use kafka::{kafka_connect, list_topics};
 use lasso::{Spur, ThreadedRodeo};
-use partition::{BrokerData, PartitionData};
+use partition::BrokerData;
 use rskafka::{
     client::{
-        multi::{OffsetQuery, RecordsQuery},
         partition::{OffsetAt, PartitionClient},
         Client,
     },
@@ -30,11 +26,11 @@ use tokio::{
     task::JoinSet,
 };
 
-use crate::{config::structure::StructureConfig, util::MaybeFut};
+use crate::{config::structure::StructureConfig, lua::ConnectStrategy, util::MaybeFut};
 
 mod kafka;
 //mod offset_poller;
-mod connection;
+//mod connection;
 mod partition;
 pub mod subscription;
 
@@ -52,16 +48,16 @@ pub struct InnerState {
 }
 
 impl InnerState {
-    pub fn watch_topic(&self, topic: Spur) {
-        self.command_sender
-            .send(Command::WatchTopic(topic))
-            .unwrap();
-    }
-    pub fn unwatch_topic(&self, topic: Spur) {
-        self.command_sender
-            .send(Command::UnwatchTopic(topic))
-            .unwrap();
-    }
+    //pub fn watch_topic(&self, topic: Spur) {
+    //    self.command_sender
+    //        .send(Command::WatchTopic(topic))
+    //        .unwrap();
+    //}
+    //pub fn unwatch_topic(&self, topic: Spur) {
+    //    self.command_sender
+    //        .send(Command::UnwatchTopic(topic))
+    //        .unwrap();
+    //}
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -87,6 +83,7 @@ pub fn spawn(
     structure_config: StructureConfig,
     lua: mlua::Lua,
     lua_state: Arc<crate::lua::LuaData>,
+    connect_strategy: ConnectStrategy,
 ) -> State {
     let (sender, receiver) = mpsc::unbounded_channel();
 
@@ -112,7 +109,12 @@ pub fn spawn(
     let state = Arc::new(state);
 
     let loop_state = state.clone();
-    tokio::spawn(event_loop(loop_state, receiver, range_sub_manager));
+    tokio::spawn(event_loop(
+        loop_state,
+        receiver,
+        range_sub_manager,
+        connect_strategy,
+    ));
 
     state
 }
@@ -150,7 +152,6 @@ impl ClientsStateInner {
 struct InternalState {
     state: State,
     partitions: BTreeMap<Spur, BTreeSet<i32>>,
-    base_offset_query: [Vec<OffsetQuery<'static>>; 2],
 }
 
 impl InternalState {
@@ -158,32 +159,8 @@ impl InternalState {
         Self {
             state,
             partitions: BTreeMap::new(),
-            base_offset_query: [Vec::new(), Vec::new()],
         }
     }
-
-    //fn rebuild_base_offset_query(&mut self, data: &Data) {
-    //    let mut early_queries = Vec::new();
-    //    let mut late_queries = Vec::new();
-    //    for watched_spur in &data.watched_topics {
-    //        if let Some(partitions) = self.partitions.get(watched_spur) {
-    //            let watched = &self.state.rodeo[*watched_spur];
-    //            for partition in partitions {
-    //                early_queries.push(OffsetQuery {
-    //                    topic: Cow::Owned(watched.to_string()),
-    //                    partition: *partition as i32,
-    //                    at: rskafka::client::partition::OffsetAt::Earliest,
-    //                });
-    //                late_queries.push(OffsetQuery {
-    //                    topic: Cow::Owned(watched.to_string()),
-    //                    partition: *partition as i32,
-    //                    at: rskafka::client::partition::OffsetAt::Latest,
-    //                });
-    //            }
-    //        }
-    //    }
-    //    self.base_offset_query = [early_queries, late_queries];
-    //}
 }
 
 enum TaskResult {
@@ -206,10 +183,11 @@ async fn event_loop(
     state: State,
     mut command_receiver: UnboundedReceiver<Command>,
     mut range_sub_manager: RangeSubscriptionManager,
+    connect_strategy: ConnectStrategy,
 ) {
     let mut internal = InternalState::new(state.clone());
 
-    let client = kafka_connect(&state).await.unwrap();
+    let client = kafka_connect(connect_strategy, &state).await.unwrap();
     let clients = Arc::new(ClientsStateInner {
         state: state.clone(),
         client,
@@ -218,7 +196,7 @@ async fn event_loop(
 
     let (partitions, topics) = list_topics(&state, &clients.client).await.unwrap();
     internal.partitions = partitions;
-    let multi = clients.client.multi_client().await.unwrap();
+    //let multi = clients.client.multi_client().await.unwrap();
 
     {
         let mut data = state.data.lock().await;
@@ -227,7 +205,7 @@ async fn event_loop(
         state.gui_context.request_repaint();
     }
 
-    let mut offset_refresh_interval = tokio::time::interval(Duration::from_secs(5));
+    let mut offset_refresh_interval = tokio::time::interval(Duration::from_secs(2));
     offset_refresh_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     offset_refresh_interval.reset_immediately();
     let mut active_refresh_offset_tasks = 0;
@@ -244,6 +222,7 @@ async fn event_loop(
                     TaskResult::OffsetChanged { topic, partition, at, offset } => {
                         let mut data = state.data.lock().await;
                         data.data.get_mut(topic, partition).set_broker_offset(at, offset);
+                        active_refresh_offset_tasks -= 1;
                     },
                     TaskResult::RecordsFetched { topic, partition, records, late_offset, .. } => {
                         if records.len() > 0 {
@@ -258,7 +237,6 @@ async fn event_loop(
             },
 
             _ = offset_refresh_interval.tick() => {
-
                 if active_refresh_offset_tasks == 0 {
                     let data = state.data.lock().await;
                     for (topic, partition, part_data) in data.data.iter() {
@@ -281,66 +259,12 @@ async fn event_loop(
                         }
                     }
                 }
-
-                //for queries in internal.base_offset_query.iter() {
-                //    let offsets = multi.get_offsets(queries).await.unwrap();
-                //    let mut data = state.data.lock().await;
-                //    for (query, result) in queries.iter().zip(offsets.iter()) {
-                //        match result {
-                //            Ok(offset) => {
-                //                let topic_spur = state.rodeo.get(&*query.topic).unwrap();
-                //                let val = data.offsets.entry((topic_spur, query.partition)).or_insert((None, None));
-                //                match query.at {
-                //                    rskafka::client::partition::OffsetAt::Earliest => val.0 = Some(*offset),
-                //                    rskafka::client::partition::OffsetAt::Latest => val.1 = Some(*offset),
-                //                }
-                //            }
-                //            Err(error) => {
-                //                log::error!("Failed to fetch offset for topic: {:?}", error);
-                //            }
-                //        }
-                //    }
-                //    log::info!("fetched offsets");
-                //}
-
-                //{
-                //    //let data = state.data.lock().await;
-                //    let mut queries = Vec::new();
-                //    {
-                //        let data = state.data.lock().await;
-                //        for ((topic, partition), (early, late)) in data.offsets.iter() {
-                //            //println!("{}, {:?}, {:?}", partition, early, late);
-                //            // If offsets are equal, no need to fetch.
-                //            if early == late {
-                //                continue;
-                //            }
-                //            if let Some(late) = late {
-                //                let early = early.unwrap();
-                //                queries.push(RecordsQuery {
-                //                    topic: state.rodeo[*topic].into(),
-                //                    partition: *partition,
-                //                    offset: early.max(*late - 100),
-                //                    bytes: 0..500_000,
-                //                });
-                //            }
-                //        }
-                //    }
-                //    if !queries.is_empty() {
-                //        let mut results = multi.fetch_records(&queries, 0).await.unwrap();
-                //        let mut data = state.data.lock().await;
-                //        for (query, result) in queries.iter().zip(results.drain(..)) {
-                //            let out = result.unwrap();
-                //            let topic_spur = state.rodeo.get(&*query.topic).unwrap();
-                //            data.data.entry((topic_spur, query.partition)).or_default().insert_chunk(out.0);
-                //        }
-                //    }
-                //}
             }
             command_ret = command_receiver.recv() => {
                 let command = command_ret.unwrap();
 
                 match command {
-                    Command::WatchTopic(name) => {
+                    Command::WatchTopic(_name) => {
                         //let mut data = state.data.lock().await;
                         //data.watched_topics.insert(name);
                         //internal.rebuild_base_offset_query(&data);
@@ -351,7 +275,7 @@ async fn event_loop(
                         //    }
                         //}
                     },
-                    Command::UnwatchTopic(name) => {
+                    Command::UnwatchTopic(_name) => {
                         //let mut data = state.data.lock().await;
                         //data.watched_topics.remove(&name);
                         //internal.rebuild_base_offset_query(&data);
@@ -365,9 +289,15 @@ async fn event_loop(
                     if let Some(sub) = range_sub_manager.try_get_by_id(sub_id) {
                         let part_data = data.data.get_mut(sub.topic, sub.partition);
                         match change {
-                            subscription::SubscriptionChange::Created(_) => part_data.put_subscription(sub_id, sub.range()),
+                            subscription::SubscriptionChange::Created(_) => {
+                                log::info!("subscription {} created ({}:{})", sub_id, &state.rodeo[sub.topic], sub.partition);
+                                part_data.put_subscription(sub_id, sub.range());
+                            },
                             subscription::SubscriptionChange::Modified(_) => part_data.put_subscription(sub_id, sub.range()),
-                            subscription::SubscriptionChange::Removed(_) => part_data.remove_subscription(sub_id),
+                            subscription::SubscriptionChange::Removed(_) => {
+                                log::info!("subscription {} removed ({}:{})", sub_id, &state.rodeo[sub.topic], sub.partition);
+                                part_data.remove_subscription(sub_id)
+                            },
                         }
                     }
                 }

@@ -1,4 +1,5 @@
 use core::str;
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use anyhow::{bail, Context};
@@ -13,12 +14,16 @@ use tokio::{io::AsyncWriteExt as _, net::TcpListener};
 use crate::apis::Cluster;
 use crate::kube_types::AnyReady;
 
+/// Listens on an address as a SOCKS5 proxy, forwards any connections
+/// to entities in the specified kubernetes cluster with the provided
+/// namespace as default.
 pub async fn listen_socks5_forward(
     cluster: Arc<Cluster>,
     default_ns: String,
     addr: impl ToSocketAddrs,
-) -> anyhow::Result<JoinHandle<()>> {
+) -> anyhow::Result<(JoinHandle<()>, SocketAddr)> {
     let listener = TcpListener::bind(addr).await?;
+    let local_addr = listener.local_addr()?;
 
     let handle = tokio::spawn(async move {
         loop {
@@ -26,12 +31,14 @@ pub async fn listen_socks5_forward(
             let apis_inner = cluster.clone();
             let default_ns = default_ns.clone();
             tokio::spawn(async move {
-                accept_conn(apis_inner, default_ns, stream).await.unwrap();
+                if let Err(error) = accept_conn(apis_inner, default_ns, stream).await {
+                    log::warn!("terminated k8s socks5 connection: {:?}", error);
+                }
             });
         }
     });
 
-    Ok(handle)
+    Ok((handle, local_addr))
 }
 
 async fn accept_conn(
@@ -70,7 +77,9 @@ async fn accept_conn(
 
     match req.command {
         Command::Connect => match &req.address {
-            Address::SocketAddress(socket_addr) => panic!("connect addr: {}", socket_addr),
+            Address::SocketAddress(socket_addr) => {
+                unimplemented!("k8s port forward for ip not implemented: {}", socket_addr);
+            }
             Address::DomainAddress(vec, port) => {
                 let addr = str::from_utf8(vec).unwrap();
 
@@ -80,8 +89,6 @@ async fn accept_conn(
                     .unwrap()
                     .with_context(|| format!("domain name not found: {}", addr))
                     .unwrap();
-
-                log::info!("resolved entity: {:?}", entity);
 
                 let pod = cluster
                     .find_pod_by_resolved_entity(&entity, &AnyReady)
@@ -102,14 +109,12 @@ async fn accept_conn(
                     .unwrap();
                 let mut remote_stream = port_forward.take_stream(*port).unwrap();
 
-                log::info!(
-                    "successfully forwarded port {}, forwarding traffic..",
-                    *port
-                );
-
-                // TODO specify address
+                // TODO is there a way to actually get this?
+                // As far as I can tell the from address of k8s port-forward is unspecified.
                 let resp = Response::new(Reply::Succeeded, Address::unspecified());
                 resp.write_to(&mut stream).await?;
+
+                log::info!("successfully forwarded port {}, relaying traffic..", *port);
 
                 crate::transfer(&mut remote_stream, &mut stream)
                     .await
@@ -118,7 +123,13 @@ async fn accept_conn(
                 Ok(())
             }
         },
-        Command::Associate => bail!("associate not supported"),
-        Command::Bind => bail!("bind not supported"),
+        Command::Associate => {
+            log::error!("attempted to ASSOCIATE over k8s socks5 proxy, operation is not supported");
+            bail!("associate not supported")
+        }
+        Command::Bind => {
+            log::error!("attempted to BIND over k8s socks5 proxy, operation is not supported");
+            bail!("bind not supported")
+        }
     }
 }
