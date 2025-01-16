@@ -47,8 +47,10 @@ const DEFAULT_COOKIE_ENV_VARS: [&'static str; 4] = [
 struct Args {
     #[command(flatten)]
     verbose: Verbosity,
+    /// Override kubernetes context from shell default
     #[arg(short, long)]
     context: Option<String>,
+    /// Specify kubernetes namespace
     #[arg(short, long)]
     namespace: String,
     #[command(subcommand)]
@@ -57,6 +59,7 @@ struct Args {
 
 #[derive(clap::Subcommand, Debug)]
 enum Commands {
+    /// Proxy a Erlang node in a kubernetes cluster to your local machine
     ProxyDeployment {
         deployment_name: String,
         /// Port to use for connecting to EPMD
