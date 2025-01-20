@@ -5,6 +5,11 @@ running on a kubernetes cluster over the Erlang distribution protocol.
 In order to make this low friction, it uses a fairly nasty hack. More
 about this in the bottom of the README, see "THE HACK".
 
+WARNING: Due to "THE HACK", the node name you see in your local session
+when connecting to a remote are not accurate, and any mentions of the
+node names going over the distribution protocol will be spookily
+rewritten.
+
 ## Installation
 1. Make sure you have `cargo` installed. It can be installed from [rustup.rs](rustup.rs).
 2. Run `cargo install erlang-distribution-dynamic-proxy --git https://github.com/hansihe/infra_tools.git`
@@ -22,6 +27,9 @@ in the deployent by default (in order):
 * `ERLANG_COOKIE`
 * `K8S_NODE_COOKIE`
 * `REMSH_COOKIE`
+
+Another env var name can be specified using CLI flags, see
+`erlang-distribution-dynamic-proxy proxy-deployment --help` for more info.
 
 ## How it works
 
