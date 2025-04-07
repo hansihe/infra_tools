@@ -351,7 +351,13 @@ impl EtfTerm {
                 ))
             }
             tag::PORT_EXT => todo!(),
-            tag::NEW_PORT_EXT => todo!(),
+            tag::NEW_PORT_EXT => tuple((p_term, be_u32, be_u32))
+                .map(|(node, id, creation)| EtfTerm::Port {
+                    node: Box::new(node),
+                    id: id.into(),
+                    creation,
+                })
+                .parse(input),
             tag::V4_PORT_EXT => tuple((p_term, be_u64, be_u32))
                 .map(|(node, id, creation)| EtfTerm::Port {
                     node: Box::new(node),
@@ -478,10 +484,19 @@ impl EtfTerm {
                 w.write_u32::<byteorder::BigEndian>(*creation)?;
             }
             EtfTerm::Port { node, id, creation } => {
-                w.write_u8(consts::tag::V4_PORT_EXT)?;
-                node.write(w)?;
-                w.write_u64::<byteorder::BigEndian>(*id)?;
-                w.write_u32::<byteorder::BigEndian>(*creation)?;
+                // https://github.com/erlang/otp/blob/cbe831300ee8300fe6c0280ff3f0eb6ef6e37eb7/lib/erl_interface/src/encode/encode_port.c#L38
+                // 28 bits
+                if *id > 0x0fffffff {
+                    w.write_u8(consts::tag::V4_PORT_EXT)?;
+                    node.write(w)?;
+                    w.write_u64::<byteorder::BigEndian>(*id)?;
+                    w.write_u32::<byteorder::BigEndian>(*creation)?;
+                } else {
+                    w.write_u8(consts::tag::NEW_PORT_EXT)?;
+                    node.write(w)?;
+                    w.write_u32::<byteorder::BigEndian>(*id as u32)?;
+                    w.write_u32::<byteorder::BigEndian>(*creation)?;
+                }
             }
             EtfTerm::Reference { node, creation, id } => {
                 w.write_u8(consts::tag::NEWER_REFERENCE_EXT)?;
